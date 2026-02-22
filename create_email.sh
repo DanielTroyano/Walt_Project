@@ -9,6 +9,7 @@ echo ""
 
 API="https://api.mail.tm"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG_FILE="$SCRIPT_DIR/email_accounts.csv"
 
 # 1. Fetch an available domain
 echo "🔍 Fetching available domains..."
@@ -44,8 +45,9 @@ ATTEMPT=0
 while [ $ATTEMPT -lt $MAX_RETRIES ]; do
     ATTEMPT=$((ATTEMPT + 1))
 
-    EMAIL_USER=$(python3 -c "
-import csv, random
+    # Capture both username and names for logging
+    PYTHON_RESULT=$(python3 -c "
+import csv, random, sys
 
 firsts = []
 lasts = []
@@ -64,12 +66,20 @@ last = random.choice(lasts)
 num = random.randint(10, 9999)
 style = random.choice(['dot', 'plain', 'underscore'])
 if style == 'dot':
-    print(f'{first}.{last}{num}')
+    username = f'{first}.{last}{num}'
 elif style == 'plain':
-    print(f'{first}{last}{num}')
+    username = f'{first}{last}{num}'
 else:
-    print(f'{first}_{last}{num}')
-")
+    username = f'{first}_{last}{num}'
+
+# Output username on stdout, names on stderr
+print(username)
+print(f'{first.title()}|{last.title()}', file=sys.stderr)
+" 2>&1)
+
+    # Extract username and names from the combined output
+    EMAIL_USER=$(echo "$PYTHON_RESULT" | grep -v '|' | head -1)
+    NAMES_FOR_LOG=$(echo "$PYTHON_RESULT" | grep '|' | head -1)
     ADDRESS="${EMAIL_USER}@${DOMAIN}"
     PASSWORD="$(python3 -c "import random, string; print(''.join(random.choices(string.ascii_letters + string.digits + '!@#', k=16)))")"
 
@@ -90,6 +100,21 @@ else:
         ACCOUNT_ID=$(echo "$BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id','unknown'))" 2>/dev/null)
         echo "   ↳ API confirmed address: $ACTUAL_ADDRESS"
         echo "   ↳ Account ID: $ACCOUNT_ID"
+        
+        # Log the account details
+        TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+        FIRST_NAME=$(echo "$NAMES_FOR_LOG" | cut -d'|' -f1)
+        LAST_NAME=$(echo "$NAMES_FOR_LOG" | cut -d'|' -f2)
+        
+        # Create log file header if it doesn't exist
+        if [ ! -f "$LOG_FILE" ]; then
+            echo "timestamp,email,first_name,last_name,account_id,password" > "$LOG_FILE"
+        fi
+        
+        # Append the new account to the log
+        echo "$TIMESTAMP,$ACTUAL_ADDRESS,$FIRST_NAME,$LAST_NAME,$ACCOUNT_ID,$PASSWORD" >> "$LOG_FILE"
+        echo "   ↳ Account logged to: email_accounts.csv"
+        
         break
     elif echo "$BODY" | grep -q "already used"; then
         echo "⚠️  Address already taken, picking a new name..."
@@ -139,3 +164,25 @@ echo "════════════════════════�
 echo ""
 echo "👉 Log in at https://mail.tm with the CONFIRMED address above."
 echo "   Or use the API with your token to read messages programmatically."
+
+# 6. Show all accounts in a formatted table
+echo ""
+echo "📋 ALL GENERATED ACCOUNTS:"
+echo ""
+python3 -c "
+import csv
+
+with open('$LOG_FILE') as f:
+    rows = list(csv.DictReader(f))
+
+if not rows:
+    print('  (no accounts yet)')
+else:
+    # Print header
+    print(f'{\"#\":<4} {\"First\":<14} {\"Last\":<14} {\"Email\":<40} {\"Password\":<20} {\"Created\"}')
+    print('─' * 115)
+    for i, r in enumerate(rows, 1):
+        print(f'{i:<4} {r[\"first_name\"]:<14} {r[\"last_name\"]:<14} {r[\"email\"]:<40} {r[\"password\"]:<20} {r[\"timestamp\"]}')
+    print()
+    print(f'  Total accounts: {len(rows)}')
+"
